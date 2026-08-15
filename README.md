@@ -2,9 +2,10 @@
 
 A template repository for building **LLM wikis**: knowledge bases stored as
 [Open Knowledge Format (OKF) v0.2](docs/okf-spec-0.2.md) bundles, populated by
-research tooling, and explored through an interactive 3D graph. Fork this repo
-once per research direction; pull tooling updates from the template as it
-evolves (see [Keeping a fork up to date](#keeping-a-fork-up-to-date)).
+research tooling, and explored through an interactive 3D graph. Derive one
+wiki repo from this template per research direction (see
+[Setting up a new fork](#setting-up-a-new-fork)); pull tooling updates from
+the template as it evolves.
 
 This README is **template-owned** and documents the tooling only — a fork's
 identity lives in its `config.yaml` (`name:` and the bundle descriptions).
@@ -20,27 +21,43 @@ A Makefile wraps the common commands — `make help` lists them.
 
 ## Setting up a new fork
 
-One fork per research direction. Use a **real fork** (or a clone with the
-template as a second remote) — GitHub's "Use this template" button creates a
-disconnected copy with no shared history, which breaks pulling tooling
-updates later.
+One wiki repo per research direction. Don't use GitHub's fork button
+(GitHub won't fork a repo into its own account) or the "Use this template"
+button (it creates a disconnected copy with no shared history, which breaks
+pulling tooling updates later). Instead: create a **new empty repo**, then
+pull the template's full history into it from a second remote.
 
 ```sh
-# 1. Fork on GitHub, then:
-git clone <your-fork-url> my-direction && cd my-direction
-git remote add template <template-repo-url>
+# 1. Create the new repo on GitHub — EMPTY: no README/license/.gitignore
+#    auto-init, or step 3 fails with "refusing to merge unrelated histories"
+gh repo create <wiki-name> --private
 
-# 2. Install and verify the toolchain
+# 2. Clone it (git warns it's empty — that's fine) and wire up the template
+git clone https://github.com/<you>/<wiki-name>.git && cd <wiki-name>
+git remote add template https://github.com/<you>/llm-wiki.git
+
+# 3. Pull the template's history and publish it
+git fetch template --tags
+git pull template main
+git push -u origin main
+git push origin --tags   # optional: carry the template's version tags
+
+# 4. Install and verify the toolchain
 uv sync
 make test
 
-# 3. Initialize the wiki
+# 5. Initialize the wiki
 uv run llmwiki init      # writes config.yaml (no bundles yet)
 ```
 
+(Use the URL form your machine authenticates with — HTTPS shown here, which
+works out of the box with `gh auth login`; `git@github.com:` requires SSH
+keys. If the template is also cloned locally, a filesystem path works too:
+`git remote add template ~/path/to/llm-wiki`.)
+
 Then make it yours:
 
-4. **Edit `config.yaml`** — set `name:` (the wiki's display name, e.g. in
+6. **Edit `config.yaml`** — set `name:` (the wiki's display name, e.g. in
    the viz title) — and create your silos (the template ships none):
 
    ```sh
@@ -51,7 +68,7 @@ Then make it yours:
    to ingest into. A bundle is a trust domain or subject area, not a
    per-source or per-topic folder.
 
-5. **Commit your fork-owned files.** (Leave `README.md` alone — it's
+7. **Commit your fork-owned files.** (Leave `README.md` alone — it's
    template-owned and will change under you on updates.) The template's
    `.gitignore` ignores `config.yaml` (so the *template* never ships one);
    your fork almost certainly wants it tracked — force-add it once and git
@@ -61,9 +78,10 @@ Then make it yours:
    git add -f config.yaml
    git add bundles/
    git commit -m "Initialize <direction> wiki"
+   git push
    ```
 
-6. **Start ingesting.** In a Claude Code session the skill in `.claude/` is
+8. **Start ingesting.** In a Claude Code session the skill in `.claude/` is
    already active — say "research X", "ingest this URL", or "sync channel Y
    into <bundle>"; the agent will ask which bundle each ingest targets.
    Or drive the CLI directly (every ingest needs `-b <bundle>`), then
@@ -169,13 +187,22 @@ file is gitignored, not the UI).
 
 ## Keeping a fork up to date
 
-Use a real fork (or add the template as a remote) — GitHub's "Use this
-template" button creates a disconnected copy with no shared history:
+The `template` remote (set up during [fork setup](#setting-up-a-new-fork))
+is the update channel:
 
 ```sh
-git remote add template <template-repo-url>
-git fetch template
-git merge template/main      # or rebase, if your fork's history is private
+git fetch template --tags
+git merge v0.2.0             # merge a specific template release (deliberate)
+# or: git merge template/main   # track the latest
+```
+
+To contribute a tooling fix back to the template, branch from the template's
+state — not your wiki's — so the PR carries only the fix:
+
+```sh
+git checkout -b fix-something template/main
+# ...edit src/ or tests/...
+git push template fix-something
 ```
 
 **Ownership contract** (what makes updates conflict-free):
