@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
+import tempfile
 from pathlib import Path
-
-import httpx
-from youtube_transcript_api import YouTubeTranscriptApi
 
 from . import okf
 from .indexer import append_log, rebuild_indexes
@@ -27,61 +26,109 @@ def video_id(url_or_id: str) -> str:
     raise ValueError(f"could not parse a YouTube video id from {url_or_id!r}")
 
 
-def oembed(vid: str) -> dict:
-    """Video title/channel via YouTube's keyless oEmbed endpoint. Best-effort."""
-    try:
-        resp = httpx.get(
-            "https://www.youtube.com/oembed",
-            params={"url": f"https://www.youtube.com/watch?v={vid}", "format": "json"},
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:
-        return {}
-
-
-_PUBLISH_DATE_RE = re.compile(r'"(?:uploadDate|publishDate)":"([^"]+)"')
-
-
-def video_publish_date(vid: str) -> str | None:
-    """Exact upload timestamp scraped from the watch page (keyless). Best-effort."""
-    try:
-        resp = httpx.get(
-            f"https://www.youtube.com/watch?v={vid}",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20.0,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        m = _PUBLISH_DATE_RE.search(resp.text)
-        return m.group(1) if m else None
-    except Exception:
-        return None
-
-
 def _timestamp(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
-def fetch_transcript(vid: str, languages: list[str]) -> tuple[str, str, list[dict]]:
-    """Return (language_code, markdown body, raw snippet data) for the transcript."""
-    fetched = YouTubeTranscriptApi().fetch(vid, languages=languages)
-    # Group snippets into ~60-second paragraphs, each led by a timestamp.
+def _json3_snippets(data: dict) -> list[dict]:
+    """Flatten a YouTube json3 caption document into snippet dicts."""
+    snippets = []
+    for ev in data.get("events", []):
+        if ev.get("aAppend"):
+            continue
+        text = "".join(seg.get("utf8", "") for seg in ev.get("segs", []))
+        text = text.replace("\n", " ").strip()
+        if not text:
+            continue
+        snippets.append({
+            "text": text,
+            "start": ev.get("tStartMs", 0) / 1000.0,
+            "duration": ev.get("dDurationMs", 0) / 1000.0,
+        })
+    return snippets
+
+
+def snippets_to_markdown(snippets: list[dict]) -> str:
+    """Group snippet dicts ({start, text, ...}) into ~60-second timestamped paragraphs."""
     paragraphs: list[str] = []
     current: list[str] = []
     block_start = 0.0
-    for snippet in fetched:
+    for snippet in snippets:
         if not current:
-            block_start = snippet.start
-        current.append(snippet.text.replace("\n", " ").strip())
-        if snippet.start - block_start >= 60:
+            block_start = snippet["start"]
+        current.append(snippet["text"])
+        if snippet["start"] - block_start >= 60:
             paragraphs.append(f"**[{_timestamp(block_start)}]** " + " ".join(current))
             current = []
     if current:
         paragraphs.append(f"**[{_timestamp(block_start)}]** " + " ".join(current))
-    return fetched.language_code, "\n\n".join(paragraphs), fetched.to_raw_data()
+    return "\n\n".join(paragraphs)
+
+
+def fetch_transcript(vid: str, languages: list[str]) -> tuple[str, str, list[dict], dict]:
+    """Return (language_code, markdown body, raw snippet data, video metadata).
+
+    One yt-dlp extraction yields both captions (manual preferred over auto)
+    and metadata, so no separate oEmbed or watch-page requests are needed.
+    """
+    from yt_dlp import YoutubeDL
+
+    with tempfile.TemporaryDirectory() as td:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": list(languages),
+            "subtitlesformat": "json3",
+            "outtmpl": {"default": f"{td}/%(id)s.%(ext)s"},
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=True)
+        sub_file = None
+        for pref in languages:
+            hits = sorted(Path(td).glob(f"*.{pref}*.json3"))
+            if hits:
+                sub_file = hits[0]
+                break
+        if sub_file is None:
+            raise RuntimeError(f"no transcript in languages {languages} for video {vid}")
+        lang = sub_file.suffixes[-2].lstrip(".")
+        snippets = _json3_snippets(json.loads(sub_file.read_text()))
+
+    return lang, snippets_to_markdown(snippets), snippets, _vmeta_from_info(info)
+
+
+def _vmeta_from_info(info: dict) -> dict:
+    if info.get("timestamp"):
+        published = datetime.datetime.fromtimestamp(
+            info["timestamp"], tz=datetime.timezone.utc
+        ).isoformat()
+    elif info.get("upload_date"):
+        d = info["upload_date"]
+        published = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    else:
+        published = None
+    return {
+        "title": info.get("title"),
+        "channel": info.get("channel") or info.get("uploader"),
+        "published_at": published,
+    }
+
+
+def video_metadata(vid: str) -> dict:
+    """Metadata-only yt-dlp extraction (title/channel/exact publish date).
+
+    Uses the player API, which is not subject to the caption endpoint's
+    per-IP limits.
+    """
+    from yt_dlp import YoutubeDL
+
+    with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+    return _vmeta_from_info(info)
 
 
 def save_transcript_concept(
@@ -97,17 +144,33 @@ def save_transcript_concept(
     Low-level: no log entry, no reindex. Returns
     (concept path, video title, topic path or None if it already existed).
     """
-    canonical = f"https://www.youtube.com/watch?v={vid}"
-    lang, body, raw_data = fetch_transcript(vid, languages or ["en"])
-    info = oembed(vid)
-    title = info.get("title", f"YouTube video {vid}")
-    published = video_publish_date(vid) or fallback_published
+    lang, body, raw_data, vmeta = fetch_transcript(vid, languages or ["en"])
+    return write_transcript_concept(
+        root, vid, lang, body, raw_data, vmeta,
+        keep_raw=keep_raw, fallback_published=fallback_published,
+    )
 
-    slug = f"{okf.slugify(title, max_len=48)}-{vid}" if info else vid
+
+def write_transcript_concept(
+    root: Path,
+    vid: str,
+    lang: str,
+    body: str,
+    raw_data: list[dict],
+    vmeta: dict,
+    keep_raw: bool = True,
+    fallback_published: str | None = None,
+) -> tuple[Path, str, Path | None]:
+    """Write a Transcript concept + draft Topic stub from already-fetched data."""
+    canonical = f"https://www.youtube.com/watch?v={vid}"
+    title = vmeta.get("title") or f"YouTube video {vid}"
+    published = vmeta.get("published_at") or fallback_published
+
+    slug = f"{okf.slugify(title, max_len=48)}-{vid}" if vmeta.get("title") else vid
     path = root / "references" / f"{slug}.md"
     source: dict = {"id": "video", "resource": canonical, "title": title}
-    if info.get("author_name"):
-        source["author"] = f"human:{okf.slugify(info['author_name'])}"
+    if vmeta.get("channel"):
+        source["author"] = f"human:{okf.slugify(vmeta['channel'])}"
     meta = {
         "type": "Source",
         "title": title,
@@ -120,8 +183,8 @@ def save_transcript_concept(
         "generated": {"by": okf.ACTOR, "at": okf.now_iso()},
         "sources": [source],
     }
-    if info.get("author_name"):
-        meta["channel"] = info["author_name"]
+    if vmeta.get("channel"):
+        meta["channel"] = vmeta["channel"]
     if keep_raw:
         meta["raw"] = save_raw(
             root, "references", slug, json.dumps(raw_data, ensure_ascii=False, indent=1), "json"
@@ -136,11 +199,28 @@ def save_transcript_concept(
 
 
 def ingest_transcript(
-    root: Path, url_or_id: str, languages: list[str] | None = None, keep_raw: bool = True
+    root: Path,
+    url_or_id: str,
+    languages: list[str] | None = None,
+    keep_raw: bool = True,
+    via: str = "direct",
 ) -> tuple[Path, Path | None]:
     """Download a video's transcript and save it as a Transcript concept."""
     vid = video_id(url_or_id)
-    path, title, topic = save_transcript_concept(root, vid, languages=languages, keep_raw=keep_raw)
+    if via == "apify":
+        from . import apify
+
+        got = apify.fetch_transcripts([vid], languages=languages).get(vid)
+        if not got:
+            raise RuntimeError(f"apify returned no transcript for video {vid}")
+        path, title, topic = write_transcript_concept(
+            root, vid, got["language"], snippets_to_markdown(got["snippets"]),
+            got["snippets"], got["vmeta"], keep_raw=keep_raw,
+        )
+    else:
+        path, title, topic = save_transcript_concept(
+            root, vid, languages=languages, keep_raw=keep_raw
+        )
     entries = [f"**Creation**: Downloaded transcript [{title}](/{path.relative_to(root)})."]
     if topic:
         entries.append(
@@ -206,6 +286,7 @@ def ingest_channel(
     delay: float = 1.5,
     languages: list[str] | None = None,
     progress=lambda msg: None,
+    via: str = "direct",
 ) -> dict:
     """Mirror transcripts for every channel upload on/after `since`. Idempotent:
     already-mirrored videos (by video_id) are skipped, so re-runs only ingest
@@ -230,7 +311,47 @@ def ingest_channel(
         selected = selected[:limit]
 
     existing = existing_video_ids(root)
-    ingested, skipped, failed = [], [], []
+    ingested, skipped, failed, out_of_window = [], [], [], []
+
+    if via == "apify":
+        from . import apify
+
+        missing = [v for v in selected if v["id"] not in existing]
+        skipped = [{"id": v["id"], "title": v["title"]} for v in selected if v["id"] in existing]
+        progress(f"apify: requesting {len(missing)} transcripts in one actor run")
+        fetched = apify.fetch_transcripts(
+            [v["id"] for v in missing], languages=languages, progress=progress
+        )
+        for v in missing:
+            got = fetched.get(v["id"])
+            if not got:
+                failed.append({"id": v["id"], "title": v["title"], "error": "no transcript returned"})
+                continue
+            fallback = (
+                datetime.datetime.fromtimestamp(v["timestamp"], tz=datetime.timezone.utc)
+                .date().isoformat()
+                if v.get("timestamp") else None
+            )
+            vmeta = dict(got["vmeta"])
+            vmeta.setdefault("channel", channel_name)
+            # Enumeration dates are approximate; the exact publish date can fall
+            # outside the window. Skip those instead of ingesting them.
+            if _published_before(vmeta.get("published_at"), since):
+                out_of_window.append({"id": v["id"], "title": v["title"],
+                                      "published_at": vmeta.get("published_at")})
+                progress(f"apify: skipped {v['title'][:60]} (published before {since})")
+                continue
+            path, title, topic = write_transcript_concept(
+                root, v["id"], got["language"], snippets_to_markdown(got["snippets"]),
+                got["snippets"], vmeta, keep_raw=keep_raw, fallback_published=fallback,
+            )
+            ingested.append(
+                {"id": v["id"], "title": title, "path": str(path),
+                 "topic": str(topic) if topic else None}
+            )
+            progress(f"apify: wrote {title[:70]}")
+        return _finish_channel(root, channel_name, since, ingested, skipped, failed, out_of_window)
+
     for i, v in enumerate(selected):
         if v["id"] in existing:
             skipped.append({"id": v["id"], "title": v["title"]})
@@ -244,9 +365,16 @@ def ingest_channel(
             else None
         )
         try:
-            path, title, topic = save_transcript_concept(
-                root, v["id"], languages=languages, keep_raw=keep_raw,
-                fallback_published=fallback,
+            lang, body, raw_data, vmeta = fetch_transcript(v["id"], languages or ["en"])
+            if _published_before(vmeta.get("published_at") or fallback, since):
+                out_of_window.append({"id": v["id"], "title": v["title"],
+                                      "published_at": vmeta.get("published_at")})
+                progress(f"skipped {v['title'][:60]} (published before {since})")
+                time.sleep(delay)
+                continue
+            path, title, topic = write_transcript_concept(
+                root, v["id"], lang, body, raw_data, vmeta,
+                keep_raw=keep_raw, fallback_published=fallback,
             )
             ingested.append(
                 {"id": v["id"], "title": title, "path": str(path),
@@ -258,10 +386,30 @@ def ingest_channel(
             )
         time.sleep(delay)
 
+    return _finish_channel(root, channel_name, since, ingested, skipped, failed, out_of_window)
+
+
+def _published_before(published, since) -> bool:
+    """True when an exact publish date is known and falls before the window."""
+    import datetime as _dt
+
+    if not published:
+        return False
+    try:
+        return _dt.date.fromisoformat(str(published)[:10]) < since
+    except ValueError:
+        return False
+
+
+def _finish_channel(root, channel_name, since, ingested, skipped, failed, out_of_window) -> dict:
     if ingested or failed:
+        window_note = (
+            f", {len(out_of_window)} skipped (published before {since})" if out_of_window else ""
+        )
         entries = [
             f"**Update**: Channel sync of {channel_name} (since {since}): "
-            f"{len(ingested)} ingested, {len(skipped)} already present, {len(failed)} failed."
+            f"{len(ingested)} ingested, {len(skipped)} already present, "
+            f"{len(failed)} failed{window_note}."
         ]
         entries += [
             f"**Creation**: Downloaded transcript [{v['title']}](/references/{Path(v['path']).name})"
@@ -275,5 +423,6 @@ def ingest_channel(
         "since": str(since),
         "ingested": ingested,
         "skipped_existing": skipped,
+        "skipped_out_of_window": out_of_window,
         "failed": failed,
     }

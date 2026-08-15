@@ -11,6 +11,7 @@ dependencies = [
     "youtube-transcript-api>=1.0",
     "yt-dlp>=2026.1.1",
     "pyyaml>=6.0",
+    "curl-cffi==0.11.4",
 ]
 
 [project.scripts]

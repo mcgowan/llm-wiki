@@ -190,13 +190,16 @@ def transcript(
     language: Optional[list[str]] = typer.Option(
         None, "--language", "-l", help="Preferred transcript languages, in order. Default: en."
     ),
+    via: str = typer.Option(
+        "direct", "--via", help="Fetch method: 'direct' (yt-dlp) or 'apify' (needs APIFY_TOKEN)."
+    ),
     bundle: Optional[str] = BundleOpt,
 ) -> None:
     """Download a YouTube transcript and save it as a Transcript concept."""
     cfg = _cfg()
     name, root = _resolve_bundle(cfg, bundle, "transcript")
     path, topic = youtube.ingest_transcript(
-        root, url, languages=language, keep_raw=cfg.keep_raw(name)
+        root, url, languages=language, keep_raw=cfg.keep_raw(name), via=via
     )
     repo.rebuild_catalog(cfg)
     typer.echo(f"Transcript:  {path.relative_to(cfg.repo_root)}")
@@ -222,6 +225,11 @@ def channel(
     limit: Optional[int] = typer.Option(None, help="Cap the number of videos ingested."),
     delay: float = typer.Option(1.5, help="Seconds between transcript fetches."),
     language: Optional[list[str]] = typer.Option(None, "--language", "-l"),
+    via: str = typer.Option(
+        "direct", "--via",
+        help="Fetch method: 'direct' (yt-dlp, per-video) or 'apify' "
+        "(one cloud actor run for the whole batch; needs APIFY_TOKEN).",
+    ),
     bundle: Optional[str] = BundleOpt,
     as_json: bool = JsonOpt,
 ) -> None:
@@ -237,6 +245,7 @@ def channel(
         delay=delay,
         languages=language,
         progress=lambda msg: typer.echo(msg, err=True),
+        via=via,
     )
     repo.rebuild_catalog(cfg)
     if as_json:

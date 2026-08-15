@@ -217,34 +217,52 @@ function rotAxis(a, ang) {  // Rodrigues rotation matrix about unit axis a
   ];
 }
 
-// Animated spin bringing a clicked node to front-center of the sphere.
+// Animated spin bringing a clicked node to its resting spot on the sphere.
+// That spot sits slightly up-left of dead-center: with the node off the view
+// axis, its great-circle edges project as visible curves instead of straight
+// spokes radiating from the middle.
+const FOCUS_TARGET = (() => {
+  const v = [-0.30, 0.30, 1], l = Math.hypot(...v);
+  return v.map(c => c / l);
+})();
+function cross(a, b) {
+  return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+}
+// Rotation carrying view-space direction v onto FOCUS_TARGET: {axis, angle},
+// or null if v is already there. Shared by the animated and instant variants.
+function focusRotation(v) {
+  const t = FOCUS_TARGET;
+  const angle = Math.acos(Math.min(1, Math.max(-1, v[0]*t[0] + v[1]*t[1] + v[2]*t[2])));
+  if (angle < 0.01) return null;
+  let axis = cross(v, t);
+  const len = Math.hypot(...axis);
+  axis = len < 1e-4 ? [0, 1, 0] : axis.map(c => c / len);
+  return { axis, angle };
+}
 let spin = null;
 function spinTo(n) {
-  const v = apply(mat, n.p);
-  const angle = Math.acos(Math.min(1, Math.max(-1, v[2])));
-  if (angle < 0.01) { spin = null; return; }
-  let axis = [v[1], -v[0], 0];  // v x z-hat: rotate v toward the viewer
-  const len = Math.hypot(axis[0], axis[1]);
-  axis = len < 1e-4 ? [0, 1, 0] : [axis[0] / len, axis[1] / len, 0];
-  spin = { mat0: mat.slice(), axis, angle, start: performance.now() };
+  const rot = focusRotation(apply(mat, n.p));
+  if (!rot) { spin = null; return; }
+  spin = { mat0: mat.slice(), axis: rot.axis, angle: rot.angle, start: performance.now() };
 }
 
 // Focus mode: while a node is selected, only it and its direct links render.
 let focus = null;
+// While a node is selected the whole sphere contracts so the selected node's
+// neighborhood reads as one tight cluster; it swells back on deselection.
+// Only positions scale — node dots and labels keep their size.
+const FOCUS_SHRINK = 0.58;
+let sphereScale = 1;
 function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : nodes; }
 
 // Instantly rotate a node to front-center — no animation. Used when a
 // re-layout moves the selected node: the rest of the graph snaps to new
 // positions, so the anchor should simply hold still rather than glide.
 function centerInstant(n) {
-  const v = apply(mat, n.p);
-  const angle = Math.acos(Math.min(1, Math.max(-1, v[2])));
-  if (angle < 1e-4) return;
-  let axis = [v[1], -v[0], 0];
-  const len = Math.hypot(axis[0], axis[1]);
-  axis = len < 1e-4 ? [0, 1, 0] : [axis[0] / len, axis[1] / len, 0];
+  const rot = focusRotation(apply(mat, n.p));
+  if (!rot) return;
   spin = null;
-  mat = mul(rotAxis(axis, angle), mat);
+  mat = mul(rotAxis(rot.axis, rot.angle), mat);
 }
 
 // After deselection the old node's highlight decays over ~a second instead
@@ -311,9 +329,10 @@ function navigate(dir) {
   updateNavUI();
 }
 
-// History controls live on the sphere: small chevrons flanking the screen
-// center — exactly where a selected node spins to — so walking history is a
-// series of adjacent clicks with minimal mouse travel.
+// History controls: small chevrons pinned to the left and right edges of the
+// visible graph area, vertically centered. Static — they ignore zoom,
+// selection, and sphere size, so the buttons are always in the same place
+// (the right one only slides in step with the info pane to stay visible).
 const navState = { back: false, fwd: false };
 let chevHover = null;
 
@@ -325,12 +344,11 @@ function updateNavUI() {
 function chevronSpots() {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.width / dpr, h = canvas.height / dpr;
-  const cx = w / 2 - paneShift, cy = h / 2;
-  // Just outside the sphere on either side, clamped to the visible area
-  // (which the pane-shift keeps symmetric), framing the globe.
-  const sphere = Math.min(w, h) * 0.408 * zoom * 1.45 + 30;
-  const off = Math.min(sphere, cx - 28);
-  return { back: { x: cx - off, y: cy }, fwd: { x: cx + off, y: cy } };
+  const margin = 36;
+  return {
+    back: { x: margin, y: h / 2 },
+    fwd: { x: w - paneShift * 2 - margin, y: h / 2 },
+  };
 }
 
 function chevAt(x, y) {
@@ -517,7 +535,7 @@ function positionTimeFilter() {
 function project(p) {
   const v = apply(mat, p);
   const S = Math.min(canvas.width, canvas.height) / (window.devicePixelRatio || 1);
-  const scale = S * 0.408 * zoom, per = 1 / (1 - v[2] * 0.32);
+  const scale = S * 0.408 * zoom * sphereScale, per = 1 / (1 - v[2] * 0.32);
   const w = canvas.width / (window.devicePixelRatio || 1), h = canvas.height / (window.devicePixelRatio || 1);
   return { x: w / 2 - paneShift + v[0] * scale * per, y: h / 2 - v[1] * scale * per, z: v[2], per };
 }
@@ -564,6 +582,11 @@ function draw() {
   if (!hasInteracted && !dragging && !spin && nowT - lastInteract > 1500)
     mat = rotXY(mat, 0, 0.0018);
 
+  // The sphere eases between full size and its focus-shrunken size on the
+  // same clock as the focus cross-fade below.
+  const sTgt = selected ? FOCUS_SHRINK : 1;
+  sphereScale = sTgt + (sphereScale - sTgt) * Math.exp(-dt * 6);
+  if (Math.abs(sphereScale - sTgt) < 0.001) sphereScale = sTgt;
   // Focus mode is a smooth cross-fade: every filter-passing node eases its
   // opacity toward 1 (in the focus neighborhood, or no focus) or 0 (hidden
   // by focus), so entering/leaving selection never pops.
