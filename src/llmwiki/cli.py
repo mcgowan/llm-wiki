@@ -191,7 +191,9 @@ def transcript(
         None, "--language", "-l", help="Preferred transcript languages, in order. Default: en."
     ),
     via: str = typer.Option(
-        "direct", "--via", help="Fetch method: 'direct' (yt-dlp) or 'apify' (needs APIFY_TOKEN)."
+        "apify", "--via",
+        help="Fetch method: 'apify' (cloud actor, needs APIFY_TOKEN; default — immune "
+        "to YouTube's per-IP caption limits) or 'direct' (local yt-dlp).",
     ),
     bundle: Optional[str] = BundleOpt,
 ) -> None:
@@ -226,9 +228,9 @@ def channel(
     delay: float = typer.Option(1.5, help="Seconds between transcript fetches."),
     language: Optional[list[str]] = typer.Option(None, "--language", "-l"),
     via: str = typer.Option(
-        "direct", "--via",
-        help="Fetch method: 'direct' (yt-dlp, per-video) or 'apify' "
-        "(one cloud actor run for the whole batch; needs APIFY_TOKEN).",
+        "apify", "--via",
+        help="Fetch method: 'apify' (cloud actor, needs APIFY_TOKEN; default — immune "
+        "to YouTube's per-IP caption limits) or 'direct' (local yt-dlp, per-video).",
     ),
     bundle: Optional[str] = BundleOpt,
     as_json: bool = JsonOpt,

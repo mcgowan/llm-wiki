@@ -80,6 +80,14 @@ uploads; suggest a dedicated bundle for a channel the user follows. It can
 run for several minutes on a large window; videos without transcripts are
 reported as failures, which is normal for some uploads.
 
+Caption downloads default to `--via apify` (an Apify cloud actor at ~$0.01
+per transcript), which needs the `APIFY_TOKEN` env var — if it is missing,
+ask the user for their Apify token setup rather than switching routes.
+`--via direct` (local yt-dlp) exists but YouTube blocks it after ~90
+transcripts per IP per day, so reserve it for when the user explicitly
+asks. Videos whose exact publish date falls before `--since` are skipped
+as out-of-window (enumeration dates are approximate; this is expected).
+
 ## The ingest chain
 
 Every ingest (fetch, transcript, channel) produces three artifacts: the raw

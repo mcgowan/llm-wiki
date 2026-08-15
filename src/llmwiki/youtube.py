@@ -203,9 +203,11 @@ def ingest_transcript(
     url_or_id: str,
     languages: list[str] | None = None,
     keep_raw: bool = True,
-    via: str = "direct",
+    via: str = "apify",
 ) -> tuple[Path, Path | None]:
     """Download a video's transcript and save it as a Transcript concept."""
+    if via not in ("apify", "direct"):
+        raise ValueError(f"unknown fetch method {via!r} (expected 'apify' or 'direct')")
     vid = video_id(url_or_id)
     if via == "apify":
         from . import apify
@@ -286,11 +288,13 @@ def ingest_channel(
     delay: float = 1.5,
     languages: list[str] | None = None,
     progress=lambda msg: None,
-    via: str = "direct",
+    via: str = "apify",
 ) -> dict:
     """Mirror transcripts for every channel upload on/after `since`. Idempotent:
     already-mirrored videos (by video_id) are skipped, so re-runs only ingest
     new uploads. Returns a summary dict."""
+    if via not in ("apify", "direct"):
+        raise ValueError(f"unknown fetch method {via!r} (expected 'apify' or 'direct')")
     import datetime as _dt
     import time
 
