@@ -74,7 +74,10 @@
   #timefilter input[type=range] { width: 200px; accent-color: var(--accent); cursor: pointer; }
   #pane {
     position: fixed; top: 0; right: 0; bottom: 0; width: 400px;
-    color: #f4f2ed;
+    /* Reading text runs 25% dimmer than the app chrome (#f4f2ed / --text
+       at 0.75 brightness), scoped to the pane so nothing else shifts. */
+    color: #b7b6b2;
+    --text: #a4aab3;
     background: var(--panel); border-left: 1px solid var(--line);
     overflow-y: auto; padding: 20px 22px;
     transform: translateX(100%); transition: transform 0.35s ease;
