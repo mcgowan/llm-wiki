@@ -72,6 +72,7 @@ def build_graph(cfg: Config) -> dict:
                 "generated_by": str(generated.get("by", "")) if isinstance(generated, dict) else "",
                 "generated_at": str(generated.get("at", "")) if isinstance(generated, dict) else "",
                 "retrieved_at": str(meta.get("retrieved_at") or ""),
+                "published_at": str(meta.get("published_at") or ""),
                 "verified": _verified_list(meta),
                 "stale_after": str(meta.get("stale_after") or ""),
                 "resource": str(meta.get("resource") or ""),

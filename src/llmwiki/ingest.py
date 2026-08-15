@@ -84,6 +84,7 @@ def create_topic_stub(
     url: str,
     kind: str = "source",
     preview: str | None = None,
+    published_at: str | None = None,
 ) -> Path | None:
     """Create the draft Topic paired with a mirrored reference.
 
@@ -100,6 +101,7 @@ def create_topic_stub(
         "description": f"Draft notes on “{title}” ({kind}; not yet curated).",
         "tags": ["needs-curation"],
         "status": "draft",
+        **({"published_at": published_at} if published_at else {}),
         "generated": {"by": okf.ACTOR, "at": okf.now_iso()},
         "sources": [{"id": slug, "resource": url, "title": title}],
     }

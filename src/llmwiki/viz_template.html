@@ -74,6 +74,7 @@
   #timefilter input[type=range] { width: 200px; accent-color: var(--accent); cursor: pointer; }
   #pane {
     position: fixed; top: 0; right: 0; bottom: 0; width: 400px;
+    color: #f4f2ed;
     background: var(--panel); border-left: 1px solid var(--line);
     overflow-y: auto; padding: 20px 22px;
     transform: translateX(100%); transition: transform 0.35s ease;
@@ -365,10 +366,11 @@ function drawNavChevrons() {
   ctx.globalAlpha = 1;
 }
 
-// Ingest-history window: day 0 = today (UTC, matching frontmatter stamps),
-// undated concepts only appear at the "everything" end.
+// History window: day 0 = today (UTC). Source publication date when known,
+// falling back to ingest stamps; undated concepts only appear at the
+// "everything" end.
 function nodeDay(n) {
-  const iso = n.retrieved_at || n.generated_at;
+  const iso = n.published_at || n.retrieved_at || n.generated_at;
   const d = iso ? new Date(iso) : null;
   if (!d || isNaN(d)) return Infinity;
   const now = new Date();
@@ -987,6 +989,7 @@ function renderPane(n) {
   html += `<div class="meta">`;
   html += `<div><b>path</b> ${esc(n.bundle)}/${esc(n.path)}</div>`;
   if (n.resource) html += `<div><b>resource</b> <a href="${esc(n.resource)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(n.resource)}</a></div>`;
+  if (n.published_at) html += `<div><b>published</b> ${esc(n.published_at.slice(0, 10))}</div>`;
   if (n.generated_by) html += `<div><b>generated</b> ${esc(n.generated_by)} @ ${esc(n.generated_at)}</div>`;
   for (const v of n.verified) html += `<div><b>verified</b> ${esc(v)}</div>`;
   if (n.stale_after) html += `<div><b>stale after</b> ${esc(n.stale_after)}</div>`;

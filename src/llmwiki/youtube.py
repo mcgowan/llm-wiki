@@ -41,6 +41,25 @@ def oembed(vid: str) -> dict:
         return {}
 
 
+_PUBLISH_DATE_RE = re.compile(r'"(?:uploadDate|publishDate)":"([^"]+)"')
+
+
+def video_publish_date(vid: str) -> str | None:
+    """Exact upload timestamp scraped from the watch page (keyless). Best-effort."""
+    try:
+        resp = httpx.get(
+            f"https://www.youtube.com/watch?v={vid}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20.0,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        m = _PUBLISH_DATE_RE.search(resp.text)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
 def _timestamp(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
@@ -66,7 +85,11 @@ def fetch_transcript(vid: str, languages: list[str]) -> tuple[str, str, list[dic
 
 
 def save_transcript_concept(
-    root: Path, vid: str, languages: list[str] | None = None, keep_raw: bool = True
+    root: Path,
+    vid: str,
+    languages: list[str] | None = None,
+    keep_raw: bool = True,
+    fallback_published: str | None = None,
 ) -> tuple[Path, str, Path | None]:
     """Fetch one video's transcript, write the Transcript concept, and pair it
     with a draft Topic stub.
@@ -78,6 +101,7 @@ def save_transcript_concept(
     lang, body, raw_data = fetch_transcript(vid, languages or ["en"])
     info = oembed(vid)
     title = info.get("title", f"YouTube video {vid}")
+    published = video_publish_date(vid) or fallback_published
 
     slug = f"{okf.slugify(title, max_len=48)}-{vid}" if info else vid
     path = root / "references" / f"{slug}.md"
@@ -92,6 +116,7 @@ def save_transcript_concept(
         "video_id": vid,
         "language": lang,
         "retrieved_at": okf.now_iso(),
+        **({"published_at": published} if published else {}),
         "generated": {"by": okf.ACTOR, "at": okf.now_iso()},
         "sources": [source],
     }
@@ -104,7 +129,8 @@ def save_transcript_concept(
 
     okf.write_concept(path, meta, f"# Transcript\n\n{body}\n")
     topic = create_topic_stub(
-        root, slug, title, canonical, kind="transcript", preview=make_preview(body)
+        root, slug, title, canonical, kind="transcript", preview=make_preview(body),
+        published_at=published,
     )
     return path, title, topic
 
@@ -210,9 +236,17 @@ def ingest_channel(
             skipped.append({"id": v["id"], "title": v["title"]})
             continue
         progress(f"[{i + 1}/{len(selected)}] {v['title'][:70]}")
+        # Approximate date from channel enumeration, used only if the exact
+        # watch-page date is unavailable.
+        fallback = (
+            _dt.datetime.fromtimestamp(v["timestamp"], tz=_dt.timezone.utc).date().isoformat()
+            if v.get("timestamp")
+            else None
+        )
         try:
             path, title, topic = save_transcript_concept(
-                root, v["id"], languages=languages, keep_raw=keep_raw
+                root, v["id"], languages=languages, keep_raw=keep_raw,
+                fallback_published=fallback,
             )
             ingested.append(
                 {"id": v["id"], "title": title, "path": str(path),
