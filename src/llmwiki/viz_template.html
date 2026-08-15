@@ -252,6 +252,17 @@ let focus = null;
 // neighborhood reads as one tight cluster; it swells back on deselection.
 // Only positions scale — node dots and labels keep their size.
 const FOCUS_SHRINK = 0.58;
+// The sphere also scales with how many nodes pass the filters: radius grows
+// with the square root of the count (constant surface density), reaching
+// full size at FULL_SPHERE_NODES. Small filtered sets huddle close — less
+// mouse travel, easier visual linking — and the sphere grows as the history
+// slider reveals more nodes.
+const FULL_SPHERE_NODES = 100;
+const MIN_DENSITY = 0.45;   // floor so tiny sets don't collapse to a dot
+const MIN_SPHERE = 0.3;     // absolute floor once selection shrink stacks on
+function densityScale() {
+  return Math.min(1, Math.max(MIN_DENSITY, Math.sqrt(nodes.length / FULL_SPHERE_NODES)));
+}
 let sphereScale = 1;
 function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : nodes; }
 
@@ -582,9 +593,10 @@ function draw() {
   if (!hasInteracted && !dragging && !spin && nowT - lastInteract > 1500)
     mat = rotXY(mat, 0, 0.0018);
 
-  // The sphere eases between full size and its focus-shrunken size on the
-  // same clock as the focus cross-fade below.
-  const sTgt = selected ? FOCUS_SHRINK : 1;
+  // The sphere eases toward its target size on the same clock as the focus
+  // cross-fade below: node-count density sets the base size, and selection
+  // shrinks further to tighten the neighborhood.
+  const sTgt = Math.max(MIN_SPHERE, densityScale() * (selected ? FOCUS_SHRINK : 1));
   sphereScale = sTgt + (sphereScale - sTgt) * Math.exp(-dt * 6);
   if (Math.abs(sphereScale - sTgt) < 0.001) sphereScale = sTgt;
   // Focus mode is a smooth cross-fade: every filter-passing node eases its
