@@ -289,6 +289,7 @@ def ingest_channel(
     languages: list[str] | None = None,
     progress=lambda msg: None,
     via: str = "apify",
+    scan_limit: int = 500,
 ) -> dict:
     """Mirror transcripts for every channel upload on/after `since`. Idempotent:
     already-mirrored videos (by video_id) are skipped, so re-runs only ingest
@@ -298,7 +299,7 @@ def ingest_channel(
     import datetime as _dt
     import time
 
-    videos, channel_name = list_channel_videos(channel)
+    videos, channel_name = list_channel_videos(channel, scan_limit=scan_limit)
     cutoff = _dt.datetime.combine(since, _dt.time.min, tzinfo=_dt.timezone.utc).timestamp()
     selected, older_streak = [], 0
     for v in videos:  # newest first; tolerate jitter in approximate dates

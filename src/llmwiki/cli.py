@@ -225,6 +225,9 @@ def channel(
     url: str = typer.Argument(..., help="Channel URL or @handle (e.g. @TheDiaryOfACEO)."),
     since: str = typer.Option("90d", help="Window: Nd/Nw/Nm or an absolute YYYY-MM-DD."),
     limit: Optional[int] = typer.Option(None, help="Cap the number of videos ingested."),
+    scan_limit: int = typer.Option(
+        500, help="How many uploads to enumerate (raise for whole-channel backfills)."
+    ),
     delay: float = typer.Option(1.5, help="Seconds between transcript fetches."),
     language: Optional[list[str]] = typer.Option(None, "--language", "-l"),
     via: str = typer.Option(
@@ -248,6 +251,7 @@ def channel(
         languages=language,
         progress=lambda msg: typer.echo(msg, err=True),
         via=via,
+        scan_limit=scan_limit,
     )
     repo.rebuild_catalog(cfg)
     if as_json:
