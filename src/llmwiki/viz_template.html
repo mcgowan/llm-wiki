@@ -283,7 +283,8 @@ function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : no
 // on deselection. Positions are model space, so a fanned-out neighbourhood is
 // a real arrangement on the sphere and still turns when the user drags.
 const RING_RADIUS = 0.95;   // angular radius of the ring, radians (~54 degrees)
-const LAYOUT_MS = 700;      // matches the selection spin, so it reads as one move
+const LAYOUT_MS = 700;         // outbound: matches the selection spin
+const LAYOUT_RETURN_MS = 520;  // homeward: matches the sphere swelling back
 
 function dot3(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
 function slerpVec(a, b, t) {
@@ -344,7 +345,7 @@ function setLayoutTargets(animate) {
     n.from = (n.p || n.home).slice();
     n.to = (targets && targets.get(n.id)) || n.home.slice();
   }
-  if (animate) layoutAnim = { start: performance.now() };
+  if (animate) layoutAnim = { start: performance.now(), homeward: !selected };
   else { layoutAnim = null; for (const n of nodes) n.p = n.to.slice(); }
 }
 
@@ -688,8 +689,15 @@ function draw() {
   // hit-testing all follow the animation for free — a fanned-out node is
   // clickable exactly where it looks.
   if (layoutAnim) {
-    const t = Math.min(1, (nowT - layoutAnim.start) / LAYOUT_MS);
-    const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;  // easeInOut
+    const dur = layoutAnim.homeward ? LAYOUT_RETURN_MS : LAYOUT_MS;
+    const t = Math.min(1, (nowT - layoutAnim.start) / dur);
+    // Outbound eases in and out so it travels with the camera spin. The trip
+    // home has no spin to match — only the sphere swelling back and the hidden
+    // nodes fading in, both of which start fast — so it eases out instead and
+    // sets off immediately rather than hanging for a beat first.
+    const e = layoutAnim.homeward
+      ? 1 - Math.pow(1 - t, 3)                                    // easeOut
+      : (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);  // easeInOut
     for (const n of nodes) n.p = slerpVec(n.from, n.to, e);
     if (t >= 1) { for (const n of nodes) n.p = n.to.slice(); layoutAnim = null; }
   }
