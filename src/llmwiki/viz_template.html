@@ -245,8 +245,12 @@ function focusRotation(v) {
   return { axis, angle };
 }
 let spin = null;
+// Aim at where a node comes to rest, not where it is mid-transition: clicking
+// a neighbour while it sits out on the focus ring must spin toward the home
+// position it is about to return to, or the camera chases a moving target.
+function restingPos(n) { return n.to || n.p; }
 function spinTo(n) {
-  const rot = focusRotation(apply(mat, n.p));
+  const rot = focusRotation(apply(mat, restingPos(n)));
   if (!rot) { spin = null; return; }
   spin = { mat0: mat.slice(), axis: rot.axis, angle: rot.angle, start: performance.now() };
 }
@@ -271,6 +275,79 @@ function densityScale() {
 let sphereScale = 1;
 function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : nodes; }
 
+// ---------- focus layout ----------
+// Shrinking alone left the neighbourhood in whatever arrangement it happened
+// to have on the full sphere: clumps only got tighter, and a neighbour that
+// sat round the back stayed hidden behind it. So while a node is selected its
+// neighbours fan out onto an evenly spaced ring around it and glide home again
+// on deselection. Positions are model space, so a fanned-out neighbourhood is
+// a real arrangement on the sphere and still turns when the user drags.
+const RING_RADIUS = 0.95;   // angular radius of the ring, radians (~54 degrees)
+const LAYOUT_MS = 700;      // matches the selection spin, so it reads as one move
+
+function dot3(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+function slerpVec(a, b, t) {
+  const om = Math.acos(Math.min(1, Math.max(-1, dot3(a, b))));
+  if (om < 1e-4) return b.slice();
+  const s = Math.sin(om), k1 = Math.sin((1 - t) * om) / s, k2 = Math.sin(t * om) / s;
+  return [a[0]*k1 + b[0]*k2, a[1]*k1 + b[1]*k2, a[2]*k1 + b[2]*k2];
+}
+// Two unit vectors spanning the plane perpendicular to c, so bearings around
+// the selected node can be measured in a consistent frame.
+function orthoBasis(c) {
+  let u = cross(Math.abs(c[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0], c);
+  const ul = Math.hypot(...u);
+  u = ul < 1e-6 ? [1, 0, 0] : u.map(x => x / ul);
+  return [u, cross(c, u)];
+}
+
+// Ring positions for a selected node's neighbourhood. Slots go to neighbours
+// in the order of their existing bearing around the selected node, and the
+// whole ring is then rotated to sit as close as possible to where they already
+// were — so the move reads as the cluster opening out rather than reshuffling,
+// and the trip back lands everyone where the eye last saw them.
+function ringTargets(sel) {
+  const out = new Map([[sel.id, sel.home.slice()]]);
+  const nbrs = (adj.get(sel.id) || []).map(id => byId.get(id)).filter(Boolean);
+  if (!nbrs.length) return out;
+  const c = sel.home, [u, v] = orthoBasis(c);
+  const bearing = nb => {
+    const d = nb.home.map((x, i) => x - c[i] * dot3(nb.home, c));
+    return Math.hypot(...d) < 1e-6 ? null : Math.atan2(dot3(d, v), dot3(d, u));
+  };
+  const ordered = nbrs
+    .map((nb, i) => ({ nb, a: bearing(nb) ?? (i / nbrs.length) * 2 * Math.PI }))
+    .sort((x, y) => x.a - y.a);
+  const step = 2 * Math.PI / ordered.length;
+  // Circular mean of each neighbour's offset from its slot: the ring rotation
+  // that moves everyone the least.
+  let sx = 0, sy = 0;
+  ordered.forEach((o, k) => { const d = o.a - k * step; sx += Math.cos(d); sy += Math.sin(d); });
+  const off = Math.atan2(sy, sx);
+  const cosR = Math.cos(RING_RADIUS), sinR = Math.sin(RING_RADIUS);
+  ordered.forEach((o, k) => {
+    const a = off + k * step, cu = Math.cos(a) * sinR, cv = Math.sin(a) * sinR;
+    out.set(o.nb.id, [c[0]*cosR + u[0]*cu + v[0]*cv,
+                      c[1]*cosR + u[1]*cu + v[1]*cv,
+                      c[2]*cosR + u[2]*cu + v[2]*cv]);
+  });
+  return out;
+}
+
+// Point every node at where it belongs for the current selection. Animated
+// moves start from wherever the node currently sits, so switching straight
+// from one selection to another glides instead of snapping home first.
+let layoutAnim = null;
+function setLayoutTargets(animate) {
+  const targets = selected ? ringTargets(selected) : null;
+  for (const n of nodes) {
+    n.from = (n.p || n.home).slice();
+    n.to = (targets && targets.get(n.id)) || n.home.slice();
+  }
+  if (animate) layoutAnim = { start: performance.now() };
+  else { layoutAnim = null; for (const n of nodes) n.p = n.to.slice(); }
+}
+
 // Instantly rotate a node to front-center — no animation. Used when a
 // re-layout moves the selected node: the rest of the graph snaps to new
 // positions, so the anchor should simply hold still rather than glide.
@@ -291,6 +368,7 @@ function selectNode(n) {
   selected = n;
   if (n) momentum = null;  // reading mode: hold the sphere still
   focus = n ? new Set([n.id, ...(adj.get(n.id) || [])]) : null;
+  setLayoutTargets(true);  // fan the neighbourhood out, or glide it home
   renderPane(n);
   if (n) spinTo(n);
   pushState();
@@ -497,20 +575,27 @@ function applyFilter() {
   nodes.forEach(n => { n.fade = prevIds.has(n.id) ? (n.fade ?? 1) : 0; });
   const ids = new Set(nodes.map(n => n.id));
   edges = DATA.edges.filter(e => ids.has(e.s) && ids.has(e.t));
-  adj = new Map(nodes.map(n => [n.id, []]));
-  for (const e of edges) { adj.get(e.s).push(e.t); adj.get(e.t).push(e.s); }
+  // Deduped: a link written into both endpoints' files arrives as two edge
+  // records, which would otherwise list a neighbour twice in the reading pane
+  // and hand it two slots on the focus ring, leaving a gap in the circle.
+  const adjSet = new Map(nodes.map(n => [n.id, new Set()]));
+  for (const e of edges) { adjSet.get(e.s).add(e.t); adjSet.get(e.t).add(e.s); }
+  adj = new Map([...adjSet].map(([id, s]) => [id, [...s]]));
   const n = nodes.length, golden = Math.PI * (3 - Math.sqrt(5));
   nodes.forEach((node, i) => {  // Fibonacci sphere; bundle-sorted => latitude bands
     const y = n === 1 ? 0 : 1 - 2 * (i + 0.5) / n;
     const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
-    node.p = [r * Math.cos(phi), y, r * Math.sin(phi)];
+    node.home = [r * Math.cos(phi), y, r * Math.sin(phi)];
+    node.p = node.home.slice();
   });
   if (selected && ids.has(selected.id)) {
     focus = new Set([selected.id, ...(adj.get(selected.id) || [])]);
+    setLayoutTargets(false);  // the ring re-forms around the new layout
     centerInstant(selected);  // hold the anchor still while the layout snaps
   } else {
     focus = null;
     if (selected) { selected = null; renderPane(null); }
+    setLayoutTargets(false);
   }
   saveFilters();
 }
@@ -598,6 +683,16 @@ function draw() {
   if (!hasInteracted && !dragging && !spin && nowT - lastInteract > 1500)
     mat = rotXY(mat, 0, 0.0018);
 
+  // Nodes glide between their home layout and the focus ring. Writing the
+  // result back into n.p means projection, edge arcs, depth sorting and
+  // hit-testing all follow the animation for free — a fanned-out node is
+  // clickable exactly where it looks.
+  if (layoutAnim) {
+    const t = Math.min(1, (nowT - layoutAnim.start) / LAYOUT_MS);
+    const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;  // easeInOut
+    for (const n of nodes) n.p = slerpVec(n.from, n.to, e);
+    if (t >= 1) { for (const n of nodes) n.p = n.to.slice(); layoutAnim = null; }
+  }
   // The sphere eases toward its target size on the same clock as the focus
   // cross-fade below: node-count density sets the base size, and selection
   // shrinks further to tighten the neighborhood.
