@@ -995,16 +995,8 @@ function md2html(md, node) {
   return out.join("");
 }
 
-// ---------- text-to-speech (Web Speech API + optional ElevenLabs) ----------
-// ElevenLabs: the API key is entered once in the player and lives only in this
-// browser's localStorage — it is never written into this file. Synthesized
-// chunks are cached in IndexedDB, so each chunk is billed at most once.
-const tts = { chunks: [], idx: 0, playing: false, paused: false, voice: null, rate: 1.25, voices: [],
-  active: "sys",
-  engine: localStorage.getItem("tts_engine") || "system",
-  el: { key: localStorage.getItem("el_key") || "", voices: [],
-        voiceId: localStorage.getItem("el_voice") || "",
-        model: "eleven_turbo_v2_5", audio: null, fetches: new Map(), gen: 0 } };
+// ---------- text-to-speech (Web Speech API; no external services) ----------
+const tts = { chunks: [], idx: 0, playing: false, paused: false, voice: null, rate: 1.25, voices: [] };
 
 function loadVoices() {
   const all = speechSynthesis.getVoices();
@@ -1035,159 +1027,8 @@ speechSynthesis.onvoiceschanged = loadVoices;
 loadVoices();
 
 function populateVoiceSelect(sel) {
-  const elOpts = tts.el.voices.length
-    ? tts.el.voices.map(v => `<option value="el:${esc(v.voice_id)}"${tts.engine === "el" && v.voice_id === tts.el.voiceId ? " selected" : ""}>11L · ${esc(v.name)}</option>`).join("")
-    : `<option value="el:setup">ElevenLabs… (${tts.el.key ? "loading voices" : "add API key"})</option>`;
-  const sysOpts = tts.voices.map(v =>
-    `<option value="sys:${esc(v.name)}"${tts.engine === "system" && tts.voice && v.name === tts.voice.name ? " selected" : ""}>${esc(v.name)}</option>`).join("");
-  sel.innerHTML = `<optgroup label="ElevenLabs">${elOpts}</optgroup><optgroup label="System">${sysOpts}</optgroup>`;
-}
-
-// ---------- ElevenLabs engine ----------
-function elStatus(msg) { const s = document.getElementById("tts-status"); if (s) s.textContent = msg; }
-
-async function elLoadVoices() {
-  if (!tts.el.key) return;
-  try {
-    const r = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": tts.el.key } });
-    if (r.status === 401 || r.status === 403) {
-      let d = "";
-      try { d = (await r.json()).detail?.status || ""; } catch { /* non-JSON body */ }
-      localStorage.removeItem("el_key"); tts.el.key = "";
-      throw new Error(d === "missing_permissions"
-        ? "key lacks the 'Voices' read permission — edit the key's scopes in the ElevenLabs dashboard"
-        : `invalid API key${d ? ` (${d})` : ""}`);
-    }
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    // Personal/cloned voices first, then the premade library, alphabetical.
-    tts.el.voices = (data.voices || []).sort((a, b) =>
-      (a.category === "premade" ? 1 : 0) - (b.category === "premade" ? 1 : 0)
-      || a.name.localeCompare(b.name));
-    if (!tts.el.voices.find(v => v.voice_id === tts.el.voiceId))
-      tts.el.voiceId = (tts.el.voices.find(v => /daniel|george|alice|rachel/i.test(v.name))
-        || tts.el.voices[0] || {}).voice_id || "";
-    if (tts.el.voiceId) localStorage.setItem("el_voice", tts.el.voiceId);
-    const sel = document.getElementById("tts-voice");
-    if (sel) populateVoiceSelect(sel);
-  } catch (e) {
-    tts.el.voices = [];
-    elStatus("ElevenLabs: " + e.message);
-  }
-}
-if (tts.el.key) elLoadVoices();
-
-function elPromptKey() {
-  const player = document.getElementById("player");
-  if (!player || document.getElementById("el-key")) return;
-  const input = document.createElement("input");
-  input.id = "el-key"; input.type = "password"; input.placeholder = "ElevenLabs API key ⏎";
-  input.style.cssText = "flex:1 1 130px;min-width:0;background:transparent;border:1px solid #555;border-radius:4px;color:inherit;padding:2px 6px;font:inherit;font-size:11px;";
-  player.appendChild(input); input.focus();
-  input.addEventListener("keydown", async e => {
-    if (e.key === "Escape") { input.remove(); return; }
-    if (e.key !== "Enter") return;
-    tts.el.key = input.value.trim();
-    input.remove();
-    if (!tts.el.key) return;
-    localStorage.setItem("el_key", tts.el.key);
-    tts.engine = "el"; localStorage.setItem("tts_engine", "el");
-    elStatus("checking key…");
-    await elLoadVoices();
-    if (tts.el.voices.length) elStatus("");
-  });
-}
-
-let elDbPromise = null;
-function elDb() {
-  if (!elDbPromise) elDbPromise = new Promise((res, rej) => {
-    const req = indexedDB.open("llmwiki-el-tts", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("audio");
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  });
-  return elDbPromise;
-}
-async function elCacheGet(key) {
-  try {
-    const db = await elDb();
-    return await new Promise((res, rej) => {
-      const rq = db.transaction("audio").objectStore("audio").get(key);
-      rq.onsuccess = () => res(rq.result || null); rq.onerror = () => rej(rq.error);
-    });
-  } catch { return null; }
-}
-async function elCachePut(key, buf) {
-  try {
-    const db = await elDb();
-    db.transaction("audio", "readwrite").objectStore("audio").put(buf, key);
-  } catch { /* cache is best-effort */ }
-}
-
-async function elHash(s) {
-  if (crypto.subtle) {
-    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
-  }
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) >>> 0;
-  return "h" + h.toString(16) + s.length;
-}
-
-function elFetchChunk(i) {
-  if (!tts.el.fetches.has(i)) tts.el.fetches.set(i, elSynthesize(tts.chunks[i]));
-  return tts.el.fetches.get(i);
-}
-
-async function elSynthesize(text) {
-  const cacheKey = await elHash(`${tts.el.voiceId}|${tts.el.model}|${text}`);
-  const cached = await elCacheGet(cacheKey);
-  if (cached) return cached;
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${tts.el.voiceId}?output_format=mp3_44100_128`, {
-    method: "POST",
-    headers: { "xi-api-key": tts.el.key, "Content-Type": "application/json" },
-    body: JSON.stringify({ text, model_id: tts.el.model }),
-  });
-  if (!r.ok) {
-    let d = null;
-    try { d = (await r.json()).detail; } catch { /* non-JSON error body */ }
-    if (r.status === 401 || r.status === 403) {
-      localStorage.removeItem("el_key"); tts.el.key = "";
-      throw new Error(d?.status === "missing_permissions"
-        ? "key lacks the 'Text to Speech' permission — edit the key's scopes in the ElevenLabs dashboard"
-        : `invalid API key${d?.status ? ` (${d.status})` : ""}`);
-    }
-    throw new Error(d?.message || d?.status || `HTTP ${r.status}`);
-  }
-  const buf = await r.arrayBuffer();
-  elCachePut(cacheKey, buf);
-  return buf;
-}
-
-async function elSpeakNext() {
-  const gen = tts.el.gen;
-  if (!tts.playing || tts.idx >= tts.chunks.length) {
-    tts.playing = false; tts.paused = false; updatePlayerUI(); return;
-  }
-  updatePlayerUI(true);
-  let buf;
-  try { buf = await elFetchChunk(tts.idx); }
-  catch (e) {
-    if (gen === tts.el.gen) { tts.playing = false; updatePlayerUI(); elStatus("ElevenLabs: " + e.message); }
-    return;
-  }
-  if (gen !== tts.el.gen || !tts.playing) return;
-  if (tts.idx + 1 < tts.chunks.length) elFetchChunk(tts.idx + 1).catch(() => {});
-  const audio = new Audio(URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" })));
-  tts.el.audio = audio;
-  audio.playbackRate = tts.rate;
-  audio.onended = () => {
-    URL.revokeObjectURL(audio.src);
-    if (gen === tts.el.gen && tts.playing) { tts.idx++; updatePlayerUI(); elSpeakNext(); }
-  };
-  audio.onerror = () => { if (gen === tts.el.gen && tts.playing) { tts.playing = false; updatePlayerUI(); } };
-  audio.play();
-  updatePlayerUI();
+  sel.innerHTML = tts.voices.map(v =>
+    `<option${tts.voice && v.name === tts.voice.name ? " selected" : ""}>${esc(v.name)}</option>`).join("");
 }
 
 function speechText(n) {
@@ -1218,28 +1059,11 @@ function chunkText(text) {
   return chunks;
 }
 
-// ElevenLabs chunks: small first chunk for fast start, larger after (fewer
-// requests; the prefetch pipeline hides their latency).
-function chunkTextEl(text) {
-  const sentences = text.split(/(?<=[.!?])\s+/), chunks = [];
-  let cur = "", limit = 280;
-  for (const s of sentences) {
-    if (cur && cur.length + s.length > limit) { chunks.push(cur); cur = s; limit = 900; }
-    else cur = cur ? cur + " " + s : s;
-  }
-  if (cur.trim()) chunks.push(cur);
-  return chunks;
-}
-
 function ttsPlay(n) {
   ttsStop();
-  const usingEl = tts.engine === "el" && tts.el.key && tts.el.voiceId;
-  tts.active = usingEl ? "el" : "sys";
-  tts.chunks = (usingEl ? chunkTextEl : chunkText)(speechText(n));
+  tts.chunks = chunkText(speechText(n));
   tts.idx = 0; tts.playing = true; tts.paused = false;
-  tts.el.fetches = new Map();
-  if (usingEl) elSpeakNext(); else speakNext();
-  updatePlayerUI();
+  speakNext(); updatePlayerUI();
 }
 
 function speakNext() {
@@ -1256,27 +1080,18 @@ function speakNext() {
 
 function ttsPauseResume() {
   if (!tts.playing) return;
-  if (tts.active === "el") {
-    if (tts.el.audio) { if (tts.paused) tts.el.audio.play(); else tts.el.audio.pause(); }
-    tts.paused = !tts.paused;
-  } else if (tts.paused) { speechSynthesis.resume(); tts.paused = false; }
+  if (tts.paused) { speechSynthesis.resume(); tts.paused = false; }
   else { speechSynthesis.pause(); tts.paused = true; }
   updatePlayerUI();
 }
 
 function ttsStop() {
   tts.playing = false; tts.paused = false;
-  tts.el.gen++;
-  if (tts.el.audio) {
-    tts.el.audio.pause();
-    try { URL.revokeObjectURL(tts.el.audio.src); } catch { /* already revoked */ }
-    tts.el.audio = null;
-  }
   speechSynthesis.cancel();
   updatePlayerUI();
 }
 
-function updatePlayerUI(loading) {
+function updatePlayerUI() {
   const status = document.getElementById("tts-status");
   const toggle = document.getElementById("tts-toggle");
   if (!status) return;
@@ -1284,8 +1099,7 @@ function updatePlayerUI(loading) {
   toggle.textContent = !tts.playing ? "▶" : (tts.paused ? "▶" : "⏸");
   toggle.title = !tts.playing ? "Read this concept aloud" : (tts.paused ? "Resume" : "Pause");
   status.textContent = tts.playing
-    ? (tts.paused ? "paused · " : "") + (loading ? "⋯ " : "")
-      + `${Math.min(tts.idx + 1, tts.chunks.length)}/${tts.chunks.length}`
+    ? (tts.paused ? "paused · " : "") + `${Math.min(tts.idx + 1, tts.chunks.length)}/${tts.chunks.length}`
     : "";
 }
 
@@ -1342,21 +1156,10 @@ function renderPane(n) {
   });
   document.getElementById("tts-stop").addEventListener("click", ttsStop);
   document.getElementById("tts-voice").addEventListener("change", e => {
-    const v = e.target.value;
-    if (v === "el:setup") { if (tts.el.key) elLoadVoices(); else elPromptKey(); return; }
-    if (v.startsWith("el:")) {
-      tts.engine = "el"; tts.el.voiceId = v.slice(3);
-      localStorage.setItem("tts_engine", "el");
-      localStorage.setItem("el_voice", tts.el.voiceId);
-    } else {
-      tts.engine = "system";
-      localStorage.setItem("tts_engine", "system");
-      tts.voice = tts.voices.find(x => x.name === v.slice(4)) || tts.voice;
-    }
+    tts.voice = tts.voices.find(v => v.name === e.target.value) || tts.voice;
   });
   document.getElementById("tts-rate").addEventListener("change", e => {
     tts.rate = parseFloat(e.target.value);
-    if (tts.el.audio) tts.el.audio.playbackRate = tts.rate;
   });
 }
 
