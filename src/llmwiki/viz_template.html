@@ -213,6 +213,8 @@ function mul(a, b) {
 function apply(m, p) {
   return [m[0]*p[0]+m[1]*p[1]+m[2]*p[2], m[3]*p[0]+m[4]*p[1]+m[5]*p[2], m[6]*p[0]+m[7]*p[1]+m[8]*p[2]];
 }
+// mat is a rotation matrix, so its inverse is just its transpose.
+function transpose(m) { return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]; }
 function rotAxis(a, ang) {  // Rodrigues rotation matrix about unit axis a
   const c = Math.cos(ang), s = Math.sin(ang), t = 1 - c, [x, y, z] = a;
   return [
@@ -259,19 +261,11 @@ function spinTo(n) {
 let focus = null;
 // While a node is selected the whole sphere contracts so the selected node's
 // neighborhood reads as one tight cluster; it swells back on deselection.
-// Only positions scale — node dots and labels keep their size.
+// Only positions scale — node dots and labels keep their size. Otherwise the
+// sphere always rests at its full size (see the 0.408 factor in project()),
+// regardless of how many nodes pass the filters — a narrowed set is spaced
+// out via frontCapHome()'s cap instead of the sphere itself shrinking.
 const FOCUS_SHRINK = 0.58;
-// The sphere also scales with how many nodes pass the filters: radius grows
-// with the square root of the count (constant surface density), reaching
-// full size at FULL_SPHERE_NODES. Small filtered sets huddle close — less
-// mouse travel, easier visual linking — and the sphere grows as the history
-// slider reveals more nodes.
-const FULL_SPHERE_NODES = 100;
-const MIN_DENSITY = 0.45;   // floor so tiny sets don't collapse to a dot
-const MIN_SPHERE = 0.3;     // absolute floor once selection shrink stacks on
-function densityScale() {
-  return Math.min(1, Math.max(MIN_DENSITY, Math.sqrt(nodes.length / FULL_SPHERE_NODES)));
-}
 let sphereScale = 1;
 function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : nodes; }
 
@@ -559,7 +553,41 @@ function renderFilters() {
     }));
 }
 
-function applyFilter() {
+// Standard Fibonacci-sphere point: uniform coverage of the whole sphere,
+// independent of camera orientation. Used whenever the visible set isn't
+// time-windowed (the "All" end of the slider, or any non-time filter).
+function fibonacciHome(i, n) {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const y = n === 1 ? 0 : 1 - 2 * (i + 0.5) / n;
+  const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
+  return [r * Math.cos(phi), y, r * Math.sin(phi)];
+}
+// Packs n points into a cap facing the camera (view-space +z, the direction
+// alphaAt/draw() render as nearest and brightest), then rotates the cap into
+// model space via the current camera orientation. Narrowing the ingest-
+// history window this way reads as the surviving nodes gathering in front
+// of the viewer, instead of half of them landing on the far side of the
+// sphere where they're nearly invisible until the user spins to find them.
+// Density is deliberately looser than the full sphere's: those points are
+// spread across the whole surface (most of it small and dim with distance),
+// while a cap sits entirely up close and magnified, so matching density
+// reads as crowded. CAP_REF_NODES fitting comfortably into one hemisphere
+// is the tuned "looks right" reference; the cap only reaches the full
+// sphere once n outgrows that hemisphere's worth of room.
+const CAP_REF_NODES = 20, CAP_REF_SOLID_ANGLE = 2 * Math.PI;  // one hemisphere
+function frontCapHome(i, n, invMat) {
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const density = CAP_REF_NODES / CAP_REF_SOLID_ANGLE;           // pts / steradian
+  const solidAngle = Math.min(4 * Math.PI, n / density);
+  const cosTheta = Math.max(-1, 1 - solidAngle / (2 * Math.PI));  // cap half-angle
+  const y = n === 1 ? 1 : 1 - (1 - cosTheta) * (i + 0.5) / n;     // view z, toward camera
+  const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
+  return apply(invMat, [r * Math.cos(phi), r * Math.sin(phi), y]);
+}
+
+// animate: glide nodes to their new positions (time-slider drags) instead of
+// snapping instantly (bundle/kind/search toggles, navigation, boot).
+function applyFilter(animate) {
   const prevIds = new Set(nodes.map(n => n.id));
   const timeEl2 = document.getElementById("time");
   const windowDays = parseInt(timeEl2.value, 10);
@@ -582,21 +610,23 @@ function applyFilter() {
   const adjSet = new Map(nodes.map(n => [n.id, new Set()]));
   for (const e of edges) { adjSet.get(e.s).add(e.t); adjSet.get(e.t).add(e.s); }
   adj = new Map([...adjSet].map(([id, s]) => [id, [...s]]));
-  const n = nodes.length, golden = Math.PI * (3 - Math.sqrt(5));
-  nodes.forEach((node, i) => {  // Fibonacci sphere; bundle-sorted => latitude bands
-    const y = n === 1 ? 0 : 1 - 2 * (i + 0.5) / n;
-    const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
-    node.home = [r * Math.cos(phi), y, r * Math.sin(phi)];
-    node.p = node.home.slice();
+  // Selection already has its own front-and-center treatment (the focus
+  // ring plus a camera spin), so the time-window cap only kicks in when
+  // nothing is selected.
+  const n = nodes.length, frontCap = !everything && !selected;
+  const invMat = frontCap ? transpose(mat) : null;
+  nodes.forEach((node, i) => {  // bundle-sorted => latitude bands / cap rings
+    node.home = frontCap ? frontCapHome(i, n, invMat) : fibonacciHome(i, n);
+    if (!node.p) node.p = node.home.slice();  // first appearance: nothing to glide from
   });
   if (selected && ids.has(selected.id)) {
     focus = new Set([selected.id, ...(adj.get(selected.id) || [])]);
-    setLayoutTargets(false);  // the ring re-forms around the new layout
-    centerInstant(selected);  // hold the anchor still while the layout snaps
+    setLayoutTargets(animate);  // the ring re-forms around the new layout
+    if (!animate) centerInstant(selected);  // hold the anchor still while the layout snaps
   } else {
     focus = null;
     if (selected) { selected = null; renderPane(null); }
-    setLayoutTargets(false);
+    setLayoutTargets(animate);
   }
   saveFilters();
 }
@@ -702,9 +732,9 @@ function draw() {
     if (t >= 1) { for (const n of nodes) n.p = n.to.slice(); layoutAnim = null; }
   }
   // The sphere eases toward its target size on the same clock as the focus
-  // cross-fade below: node-count density sets the base size, and selection
-  // shrinks further to tighten the neighborhood.
-  const sTgt = Math.max(MIN_SPHERE, densityScale() * (selected ? FOCUS_SHRINK : 1));
+  // cross-fade below: full size at rest, selection shrinks it to tighten
+  // the neighborhood.
+  const sTgt = selected ? FOCUS_SHRINK : 1;
   sphereScale = sTgt + (sphereScale - sTgt) * Math.exp(-dt * 6);
   if (Math.abs(sphereScale - sTgt) < 0.001) sphereScale = sTgt;
   // Focus mode is a smooth cross-fade: every filter-passing node eases its
@@ -1166,7 +1196,7 @@ function renderPane(n) {
 // ---------- boot ----------
 const timeEl = document.getElementById("time");
 timeEl.max = maxDay; timeEl.value = maxDay;
-timeEl.addEventListener("input", () => applyFilter());  // live preview
+timeEl.addEventListener("input", () => applyFilter(true));  // live preview, animated
 timeEl.addEventListener("change", pushState);  // one history entry per released drag
 const searchEl = document.getElementById("search");
 
