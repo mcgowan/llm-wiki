@@ -858,27 +858,27 @@ function draw() {
       const op = project(slerp(t));
       const orbAlpha = (0.02 + 0.7 * Math.pow((op.z + 1) / 2, 6)) * eFade;
       if (orbAlpha > 0.02) {
-        // Brighten the connector's own color (no glow/bloom, no white) for
-        // 30% of the connector's own length on each side of the orb — 60%
-        // of the whole connector lit at once — fading back to the ordinary
-        // grey at both ends — the line itself reads as lit where the orb is
-        // riding it, rather than the orb radiating a separate halo.
-        const dt = 0.3;
-        const t0 = Math.max(0, t - dt), t1 = Math.min(1, t + dt);
-        const litSteps = Math.max(2, Math.ceil(omega * 14 * (t1 - t0)));
+        // Brighten the connector's own color (no glow/bloom, no white) only
+        // behind the orb — back toward where it came from, 60% of the
+        // connector's own length — fading from full brightness at the orb
+        // down to the ordinary grey at the tail's far end. Nothing lit
+        // ahead of it, so it reads as a comet's tail rather than a
+        // symmetric halo.
+        const dt = 0.6;
+        const t0 = Math.max(0, t - dt);
+        const litSteps = Math.max(2, Math.ceil(omega * 14 * (t - t0)));
         const gp = tt => tt <= 0 ? arcA : tt >= 1 ? arcB : project(slerp(tt));
-        const p0 = gp(t0), p1 = gp(t1);
+        const p0 = gp(t0);
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y);
         for (let i = 1; i <= litSteps; i++) {
-          const cur = gp(t0 + (t1 - t0) * i / litSteps);
+          const cur = gp(t0 + (t - t0) * i / litSteps);
           ctx.lineTo(cur.x, cur.y);
         }
         // 50% brighter than the connector's own base color (45, 49, 58).
-        const lit = ctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+        const lit = ctx.createLinearGradient(p0.x, p0.y, op.x, op.y);
         lit.addColorStop(0, "rgba(68, 74, 87, 0)");
-        lit.addColorStop(0.5, "rgba(68, 74, 87, 1)");
-        lit.addColorStop(1, "rgba(68, 74, 87, 0)");
+        lit.addColorStop(1, "rgba(68, 74, 87, 1)");
         ctx.globalAlpha = orbAlpha;
         ctx.strokeStyle = lit;
         ctx.lineWidth = 1;
