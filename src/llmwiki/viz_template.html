@@ -31,7 +31,9 @@
   }
   #hud > * { pointer-events: auto; }
   #hud h1 { font-size: 19px; font-weight: 600; letter-spacing: .02em; }
-  #hud-top { display: flex; align-items: center; gap: 14px; }
+  /* Wraps the search box below the title, rather than overlapping the
+     history slider, once JS caps #hud's width (see positionTimeFilter). */
+  #hud-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; row-gap: 8px; }
   #search {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: 8px; padding: 5px 11px; font: inherit; font-size: 13px; width: 210px;
@@ -184,6 +186,15 @@ const PALETTE = ["#4f8ef7", "#f7734f", "#42c98d", "#c86bfa", "#f2c94c", "#ef5da8
 const bundleColor = {};
 DATA.bundles.forEach((b, i) => bundleColor[b] = PALETTE[i % PALETTE.length]);
 const byId = new Map(DATA.nodes.map(n => [n.id, n]));
+// Ambient life: a fixed ~39% of edges carry a small orb that glides along
+// the arc when the edge isn't otherwise lit up (selected/hovered/ghost).
+// Assigned once here (not per filter pass) so the same edges keep their
+// orb — and its phase/speed — across filter changes instead of reshuffling.
+DATA.edges.forEach(e => {
+  e.hasOrb = Math.random() < 0.39;  // was 0.3, +30% relative
+  e.orbPhase = Math.random();
+  e.orbSpeed = (0.12 + Math.random() * 0.1) * 0.4;  // arc traversals per second, -60%
+});
 
 const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
 const pane = document.getElementById("pane");
@@ -264,7 +275,8 @@ let focus = null;
 // Only positions scale — node dots and labels keep their size. Otherwise the
 // sphere always rests at its full size (see the 0.408 factor in project()),
 // regardless of how many nodes pass the filters — a narrowed set is spaced
-// out via frontCapHome()'s cap instead of the sphere itself shrinking.
+// out via recencyFrontHome()'s camera-anchored layout instead of the
+// sphere itself shrinking.
 const FOCUS_SHRINK = 0.58;
 let sphereScale = 1;
 function visibleNodes() { return focus ? nodes.filter(n => focus.has(n.id)) : nodes; }
@@ -562,25 +574,19 @@ function fibonacciHome(i, n) {
   const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
   return [r * Math.cos(phi), y, r * Math.sin(phi)];
 }
-// Packs n points into a cap facing the camera (view-space +z, the direction
-// alphaAt/draw() render as nearest and brightest), then rotates the cap into
-// model space via the current camera orientation. Narrowing the ingest-
-// history window this way reads as the surviving nodes gathering in front
-// of the viewer, instead of half of them landing on the far side of the
-// sphere where they're nearly invisible until the user spins to find them.
-// Density is deliberately looser than the full sphere's: those points are
-// spread across the whole surface (most of it small and dim with distance),
-// while a cap sits entirely up close and magnified, so matching density
-// reads as crowded. CAP_REF_NODES fitting comfortably into one hemisphere
-// is the tuned "looks right" reference; the cap only reaches the full
-// sphere once n outgrows that hemisphere's worth of room.
-const CAP_REF_NODES = 20, CAP_REF_SOLID_ANGLE = 2 * Math.PI;  // one hemisphere
-function frontCapHome(i, n, invMat) {
+// Same Fibonacci sphere as fibonacciHome — full pole-to-pole coverage, not
+// a restricted cap — but its pole (i=0) is anchored to the camera-facing
+// direction (view-space +z) via the current camera rotation instead of the
+// world Y axis. Combined with sorting the time-filtered set by recency
+// before assigning indices, this puts the newest node at the center of the
+// sphere's visible face and spreads progressively older ones out toward
+// the back and sides. A restricted cap read as lopsided when spun (dense
+// and convex on the populated side, hollow and concave on the empty back);
+// using the whole sphere keeps it round from every angle, just re-anchored
+// to read newest-to-oldest from the viewer's vantage point.
+function recencyFrontHome(i, n, invMat) {
   const golden = Math.PI * (3 - Math.sqrt(5));
-  const density = CAP_REF_NODES / CAP_REF_SOLID_ANGLE;           // pts / steradian
-  const solidAngle = Math.min(4 * Math.PI, n / density);
-  const cosTheta = Math.max(-1, 1 - solidAngle / (2 * Math.PI));  // cap half-angle
-  const y = n === 1 ? 1 : 1 - (1 - cosTheta) * (i + 0.5) / n;     // view z, toward camera
+  const y = n === 1 ? 1 : 1 - 2 * (i + 0.5) / n;  // view z; i=0 sits at the camera
   const r = Math.sqrt(Math.max(0, 1 - y * y)), phi = i * golden;
   return apply(invMat, [r * Math.cos(phi), r * Math.sin(phi), y]);
 }
@@ -599,24 +605,40 @@ function applyFilter(animate) {
     (everything || n.day <= windowDays) &&
     (isSource(n) ? activeKinds.source : activeKinds.topic) &&
     (!searchQuery || n.title.toLowerCase().includes(searchQuery)));
-  nodes.sort((a, b) => (a.bundle + a.path).localeCompare(b.bundle + b.path));
+  // Selection already has its own front-and-center treatment (the focus
+  // ring plus a camera spin), so the recency layout only kicks in when
+  // nothing is selected.
+  const frontCap = !everything && !selected;
+  // Recency order (newest first) so index 0 lands at the camera-facing pole;
+  // otherwise bundle-sorted so same-bundle nodes band together in latitude.
+  nodes.sort(frontCap ? (a, b) => a.day - b.day
+                       : (a, b) => (a.bundle + a.path).localeCompare(b.bundle + b.path));
   // Nodes entering the view fade in; nodes already visible keep their fade.
   nodes.forEach(n => { n.fade = prevIds.has(n.id) ? (n.fade ?? 1) : 0; });
   const ids = new Set(nodes.map(n => n.id));
   edges = DATA.edges.filter(e => ids.has(e.s) && ids.has(e.t));
-  // Deduped: a link written into both endpoints' files arrives as two edge
-  // records, which would otherwise list a neighbour twice in the reading pane
-  // and hand it two slots on the focus ring, leaving a gap in the circle.
+  // A link written into both endpoints' files arrives as two edge records
+  // (A->B and B->A) — collapse to one per undirected pair before drawing.
+  // Left undeduped, that pair renders as two overlapping strokes, and each
+  // independently carries its own ambient orb, which reads as two orbs
+  // riding the same connector in opposite directions.
+  const seenPairs = new Set();
+  edges = edges.filter(e => {
+    const key = e.s < e.t ? e.s + "|" + e.t : e.t + "|" + e.s;
+    if (seenPairs.has(key)) return false;
+    seenPairs.add(key);
+    return true;
+  });
+  // Also deduped here for the neighbour list/focus ring, which would
+  // otherwise list a neighbour twice and leave it two slots (a gap) on
+  // the ring — redundant with the filter above but harmless to keep.
   const adjSet = new Map(nodes.map(n => [n.id, new Set()]));
   for (const e of edges) { adjSet.get(e.s).add(e.t); adjSet.get(e.t).add(e.s); }
   adj = new Map([...adjSet].map(([id, s]) => [id, [...s]]));
-  // Selection already has its own front-and-center treatment (the focus
-  // ring plus a camera spin), so the time-window cap only kicks in when
-  // nothing is selected.
-  const n = nodes.length, frontCap = !everything && !selected;
+  const n = nodes.length;
   const invMat = frontCap ? transpose(mat) : null;
-  nodes.forEach((node, i) => {  // bundle-sorted => latitude bands / cap rings
-    node.home = frontCap ? frontCapHome(i, n, invMat) : fibonacciHome(i, n);
+  nodes.forEach((node, i) => {
+    node.home = frontCap ? recencyFrontHome(i, n, invMat) : fibonacciHome(i, n);
     if (!node.p) node.p = node.home.slice();  // first appearance: nothing to glide from
   });
   if (selected && ids.has(selected.id)) {
@@ -661,7 +683,15 @@ function positionTimeFilter() {
   const tf = document.getElementById("timefilter");
   const open = document.body.classList.contains("pane-open");
   tf.style.transition = typeof paneResizing !== "undefined" && paneResizing ? "none" : "";
-  tf.style.right = (open ? paneWidth + 16 : 16) + "px";
+  const rightOffset = open ? paneWidth + 16 : 16;
+  tf.style.right = rightOffset + "px";
+  // Cap the title/search cluster's width to whatever room is actually left
+  // of the slider's current left edge, so on a narrow window or with a wide
+  // detail pane the search box wraps below the title (#hud-top is
+  // flex-wrap) instead of running underneath the slider.
+  const tfLeft = window.innerWidth - rightOffset - tf.offsetWidth;
+  const hudLeft = document.getElementById("hud").offsetLeft;
+  document.getElementById("hud").style.maxWidth = Math.max(120, tfLeft - hudLeft - 16) + "px";
 }
 
 function project(p) {
@@ -801,17 +831,75 @@ function draw() {
     // where the arc is nearer the viewer, sampled at both ends and the
     // midpoint (arcs can bow toward the camera between two far endpoints).
     const mid = project(slerp(0.5));
-    // Quadratic depth fade: near ends stay visible, far ends all but vanish.
-    const alphaAt = z => (0.008 + 0.15 * Math.pow((z + 1) / 2, 2)).toFixed(3);
+    // Steep depth fade: only the dead-center-front stays bright, tapering off
+    // well before the sphere's silhouette edge (z=0) — a high power keeps
+    // the falloff aggressive while z is still positive, and the near-zero
+    // floor lets edges vanish entirely past the silhouette rather than
+    // lingering into the far side.
+    const alphaAt = z => (0.002 + 0.15 * Math.pow((z + 1) / 2, 6)).toFixed(3);
     const g = ctx.createLinearGradient(arcA.x, arcA.y, arcB.x, arcB.y);
-    g.addColorStop(0, `rgba(139, 149, 167, ${alphaAt(arcA.z)})`);
-    g.addColorStop(0.5, `rgba(139, 149, 167, ${alphaAt(mid.z)})`);
-    g.addColorStop(1, `rgba(139, 149, 167, ${alphaAt(arcB.z)})`);
+    g.addColorStop(0, `rgba(45, 49, 58, ${alphaAt(arcA.z)})`);
+    g.addColorStop(0.5, `rgba(45, 49, 58, ${alphaAt(mid.z)})`);
+    g.addColorStop(1, `rgba(45, 49, 58, ${alphaAt(arcB.z)})`);
     ctx.strokeStyle = g;
     ctx.lineWidth = 1;
     ctx.globalAlpha = eFade;
     tracePath();
     ctx.stroke();
+    if (!active && e.hasOrb) {
+      // A single small bead gliding along the arc, looping forever — purely
+      // ambient, so it only appears on edges with no highlight to disturb.
+      // Exactly one position (t) is computed per edge per frame — never
+      // draw a trail or a second sample here, or a connector reads as
+      // carrying more than one orb at once.
+      // Steep depth fade (matching the connector lines' own falloff) so it
+      // reads as bright only right at the face and goes dark fast off it.
+      const t = ((nowT / 1000) * e.orbSpeed + e.orbPhase) % 1;
+      const op = project(slerp(t));
+      const orbAlpha = (0.02 + 0.7 * Math.pow((op.z + 1) / 2, 6)) * eFade;
+      if (orbAlpha > 0.02) {
+        // Brighten the connector's own color (no glow/bloom, no white) for
+        // 30% of the connector's own length on each side of the orb — 60%
+        // of the whole connector lit at once — fading back to the ordinary
+        // grey at both ends — the line itself reads as lit where the orb is
+        // riding it, rather than the orb radiating a separate halo.
+        const dt = 0.3;
+        const t0 = Math.max(0, t - dt), t1 = Math.min(1, t + dt);
+        const litSteps = Math.max(2, Math.ceil(omega * 14 * (t1 - t0)));
+        const gp = tt => tt <= 0 ? arcA : tt >= 1 ? arcB : project(slerp(tt));
+        const p0 = gp(t0), p1 = gp(t1);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        for (let i = 1; i <= litSteps; i++) {
+          const cur = gp(t0 + (t1 - t0) * i / litSteps);
+          ctx.lineTo(cur.x, cur.y);
+        }
+        // 50% brighter than the connector's own base color (45, 49, 58).
+        const lit = ctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+        lit.addColorStop(0, "rgba(68, 74, 87, 0)");
+        lit.addColorStop(0.5, "rgba(68, 74, 87, 1)");
+        lit.addColorStop(1, "rgba(68, 74, 87, 0)");
+        ctx.globalAlpha = orbAlpha;
+        ctx.strokeStyle = lit;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // A fixed upper-left highlight (as if lit from one side) instead of
+        // a flat fill, so it reads as a small reflective bead rather than a
+        // flat dot sliding along the line.
+        const orbR = 0.53 * op.per;
+        const glint = ctx.createRadialGradient(
+          op.x - orbR * 0.35, op.y - orbR * 0.35, 0,
+          op.x, op.y, orbR);
+        glint.addColorStop(0, "#ffffff");
+        glint.addColorStop(0.45, "#aeb7c7");
+        glint.addColorStop(1, "#3a3f4a");
+        ctx.globalAlpha = orbAlpha;
+        ctx.fillStyle = glint;
+        ctx.beginPath();
+        ctx.arc(op.x, op.y, orbR, 0, 7);
+        ctx.fill();
+      }
+    }
     if (active && originFade > 0) {
       // Lingering highlight: the blue drains off the grey base as the ghost
       // fades, crossfading blue -> grey instead of popping.
